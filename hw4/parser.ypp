@@ -1,0 +1,925 @@
+%{
+	#include "parser.hpp"
+	#include "output.hpp"
+	#include "boost/lexical_cast.hpp"
+	#include <algorithm>
+	
+	#define YYERROR_VERBOSE 1
+	#define YYDEBUG 1
+	
+
+	using namespace std;
+	using namespace output;
+
+	extern int yylex();
+	extern int yylineno;
+	extern char* yytext;
+	void yyerror(const char * message);
+	
+	// Global Variables:
+	
+	stack <SymbolTable*>* tables = new stack < SymbolTable* >();
+	stack <int>* offset_stack = new stack <int>();
+	int while_count=0;
+	string ret_type = "";
+	
+	// Functions:
+	
+	Info* get_struct_info(string id);
+	
+	void check_exp_type(YYSTYPE exp,string type);
+	
+	void check_params(vector<string> expect, vector<string> recieved,string id);
+	
+	void check_id_free(string id);
+	
+	string get_exp_type(YYSTYPE exp);
+	
+	Info* get_info(string name);
+	
+	string get_binop_result(string num1,string num2,string op);
+		
+	void end_scope();
+	
+	bool is_struct_field(string struct_ID,string field);
+	
+	string get_struct_field_type(string struct_ID, string name);
+	
+	vector<string>* get_struct_fields(vector< pair <string,string> > fields, int x);
+	
+	vector <string>* add_struct_to_args(vector<string>* args); 
+	
+%}
+
+
+%token VOID
+%token INT
+%token BYTE
+%token B
+%token BOOL
+%token STRUCT
+%token TRUE
+%token FALSE
+%token RETURN
+%token IF
+%nonassoc CONFLICT
+%nonassoc ELSE
+%token WHILE
+%token BREAK
+%token CONTINUE
+%token SC
+%token COMMA
+%left PERIOD
+%token ID
+%token NUM
+%token STRING
+%right ASSIGN
+%left AND
+%left OR
+%left RELOPL
+%nonassoc RELOPN
+%left BINOP
+%right NOT
+%token LPAREN
+%token RPAREN
+%token LBRACE
+%token RBRACE
+
+
+%%
+
+
+Program	:	M Structs Funcs  // 1
+		{
+			Info* main_info = get_info("main");
+			
+			if (main_info==NULL || main_info->type!="VOID" || main_info->arg_types==NULL ||  main_info->arg_types->size()!=0){
+				errorMainMissing();
+				exit(0);
+			}			
+			
+			end_scope();
+		}
+	;
+	
+	
+M : /* Epsilon */
+		{
+			
+		// global scope
+		SymbolTable* table = new SymbolTable();
+		tables->push(table);
+		offset_stack->push(0);
+		
+		// insert print
+		vector<string>* args1 = new vector<string>();
+		args1->push_back("STRING");
+		Info* info1 = new Info("print","VOID",0,args1,NULL);
+		(tables->top())->push_back(info1);
+				
+		// insert printi
+		vector<string>* args2 = new vector<string>();
+		args2->push_back("INT");
+		Info* info2 = new Info("printi","VOID",0,args2,NULL);
+		(tables->top())->push_back(info2);
+		}
+	;
+	
+	
+OpenScope : /* Epsilon */
+		{
+		
+			SymbolTable* table = new SymbolTable();
+			tables->push(table);
+			offset_stack->push(offset_stack->top());
+		}
+		;
+		
+EndScope : /* Epsilon */
+		{
+			end_scope();	
+		}
+		;
+	
+	
+	
+Funcs : // 2 - Epsilon
+		| FuncDecl Funcs  // 3
+		;
+		
+		
+FuncDecl : RetType ID LPAREN Formals RPAREN LBRACE 
+			{
+				check_id_free(dynamic_cast<Value_node*>($2)->value);
+			
+				vector<string>* types = new vector<string>(*dynamic_cast<Mem_list*>($4)->types);
+				vector<string>* names = new vector<string>(*dynamic_cast<Mem_list*>($4)->names);
+				
+				Info* new_info = new Info(dynamic_cast<Value_node*>($2)->value,$1->type,0,types,NULL);
+				(tables->top())->push_back(new_info);
+				
+				
+				SymbolTable* table = new SymbolTable();
+				tables->push(table);
+				offset_stack->push(0);
+				
+				int offset = 0;
+				
+				for (int i=0; i<types->size(); i++){
+					check_id_free(names->at(i));
+
+					string type = types->at(i);
+					if (type!="INT" && type!="BYTE" && type!="BOOL")
+					{
+						Info* struct_info = get_struct_info(type);
+						int size = struct_info->struct_fields->size();
+						
+						offset-=size;
+						vector< pair <string, string> >* fields = new vector< pair <string, string> >(*(struct_info->struct_fields));
+						(tables->top())->push_back(new Info(names->at(i),type,offset,NULL,fields));
+						
+					}
+					else{
+						offset-=1;
+						(tables->top())->push_back(new Info(names->at(i),type,offset,NULL,NULL));
+						
+					}
+				}
+			}
+			
+			Statements RBRACE // 4
+			{	
+				end_scope();
+			}
+		;
+		
+BoolExp : Exp
+		{
+			check_exp_type($1,"BOOL");
+			$$=$1;
+		}
+		
+Structs : // 5 - Epsilon
+		| StructsDecl Structs // 6
+		;
+		
+StructsDecl : STRUCT ID	{check_id_free(dynamic_cast<Value_node*>($2)->value);} LBRACE StructMemList RBRACE SC // 7
+		{
+			string id = dynamic_cast<Value_node*>($2)->value;
+			
+			vector<string> types = *(dynamic_cast<Mem_list*>($5)->types);
+			vector<string> names = *(dynamic_cast<Mem_list*>($5)->names);
+			
+			vector< pair <string, string> >* vec = new vector< pair <string, string> >();
+			
+			for (int i=0; i<types.size();i++){
+				vec->push_back(pair<string,string>(types.at(i),names.at(i)));
+			}
+			
+			Info* new_info = new Info(id,"STRUCT",offset_stack->top(),NULL,vec);
+			(tables->top())->push_back(new_info);
+			
+		}
+		;
+		
+RetType	: Type // 8
+		{
+			$$ = $1;
+			ret_type=$1->type;
+		}
+		
+		| VOID // 9
+		{
+			$$ = new Node("VOID");
+			ret_type="VOID";
+		}
+		;
+		
+Formals : // 10 - Epsilon
+		{
+			vector<string>* temp = new vector<string>();
+			$$ = new Mem_list(temp,temp);
+			delete temp;
+		}
+
+		| FormalsList // 11
+		{
+			$$ = $1;
+		}
+		;
+		
+FormalsList : FormalDecl // 12
+			{
+				$$ = new Mem_list($1->type,dynamic_cast<Value_node*>($1)->value);
+			}
+			
+			| FormalsList COMMA FormalDecl // 13
+			{
+				vector<string>* types = dynamic_cast<Mem_list*>($1)->types;
+				vector<string>* names = dynamic_cast<Mem_list*>($1)->names;
+				
+				$$ = new Mem_list(types,names);
+				
+				if (find(names->begin(),names->end(),dynamic_cast<Value_node*>($3)->value)!=names->end()){
+					errorDef(yylineno,dynamic_cast<Value_node*>($3)->value);
+					exit(0);
+				}
+				dynamic_cast<Mem_list*>($$)->types->push_back($3->type);
+				dynamic_cast<Mem_list*>($$)->names->push_back(dynamic_cast<Value_node*>($3)->value);
+
+			}
+		;
+		
+		
+		
+FormalDecl : Type ID // 14
+		{
+			$$ = new Value_node($1->type,dynamic_cast<Value_node*>($2)->value);
+		}
+		
+		| StructType ID // 15
+		{
+			$$ = new Value_node($1->type,dynamic_cast<Value_node*>($2)->value);
+		}
+	;
+		
+StructMemList : StructMem // 16
+		{
+			$$ = new Mem_list($1->type,dynamic_cast<Value_node*>($1)->value);
+		}
+		
+		| StructMemList StructMem  // 17
+		{
+			vector<string>* types = dynamic_cast<Mem_list*>($1)->types;
+			vector<string>* names = dynamic_cast<Mem_list*>($1)->names;
+			
+			if (find(names->begin(),names->end(),dynamic_cast<Value_node*>($2)->value) != names->end()){
+				errorDef(yylineno,dynamic_cast<Value_node*>($2)->value);
+					exit(0);
+			}
+			
+			$$ = new Mem_list(types,names);
+			
+			dynamic_cast<Mem_list*>($$)->types->push_back($2->type);
+			dynamic_cast<Mem_list*>($$)->names->push_back(dynamic_cast<Value_node*>($2)->value);
+			
+		}
+		;
+		
+StructMem : Type ID SC // 18
+		{
+			$$ = new Value_node($1->type,dynamic_cast<Value_node*>($2)->value);
+		}
+		;
+		
+Statements : Statement // 19
+		
+		| Statements Statement // 20
+		;
+		
+Statement : 
+				
+		 LBRACE OpenScope Statements RBRACE // 21
+		{
+			end_scope();
+		}
+		
+		| Type ID SC // 22
+		{
+			string id = dynamic_cast<Value_node*>($2)->value;
+			
+			check_id_free(id);
+			
+			int top = offset_stack->top();
+			Info* new_info = new Info(id,$1->type,offset_stack->top(),NULL,NULL);
+			(tables->top())->push_back(new_info);
+
+			offset_stack->pop();
+			offset_stack->push(top+1);
+		}
+		
+		| StructType ID SC //23
+		{
+			string id = dynamic_cast<Value_node*>($2)->value;
+			check_id_free(id);
+						
+			int size = get_struct_info($1->type)->struct_fields->size();
+			
+			int top = offset_stack->top();
+			Info* new_info = new Info(id,$1->type,offset_stack->top(),NULL,NULL);
+			(tables->top())->push_back(new_info);
+			offset_stack->pop();
+			offset_stack->push(top+size);
+		}
+		
+		| STRUCT ID	{check_id_free(dynamic_cast<Value_node*>($2)->value);} LBRACE StructMemList RBRACE SC //24
+		{
+			string id = dynamic_cast<Value_node*>($2)->value;
+			vector<string>* types = dynamic_cast<Mem_list*>($5)->types;
+			vector<string>* names = dynamic_cast<Mem_list*>($5)->names;
+			
+			vector< pair < string,string > >* vec = new vector< pair < string,string > >();
+			
+			for (int i=0; i<types->size();i++){
+				vec->push_back(pair<string,string>(types->at(i),names->at(i)));
+			}
+			
+			Info* new_info = new Info(id,"STRUCT",0,NULL,vec);
+			(tables->top())->push_back(new_info);	
+		}
+		
+		| Type ID ASSIGN Exp SC // 25
+		{
+			string id = dynamic_cast<Value_node*>($2)->value;
+			
+			check_id_free(id);
+			
+			string type = get_exp_type($4);
+			
+			if (type != $1->type && !($1->type=="INT" && type=="BYTE")){
+				errorMismatch(yylineno);
+				exit(0);
+			}
+			
+			int top = offset_stack->top();
+			Info* new_info = new Info(id,$1->type,top,NULL,NULL);
+			(tables->top())->push_back(new_info);
+			offset_stack->pop();
+			offset_stack->push(top+1);
+		}
+		
+		| StructType ID ASSIGN Exp SC // 26
+		{
+			string id = dynamic_cast<Value_node*>($4)->value ;
+			
+			check_id_free(id);
+			
+			check_exp_type($4,$1->type);
+			
+			// Adding to table
+			int top = offset_stack->top();
+			Info* new_info = new Info(id, $1->type, top,NULL,NULL);
+			(tables->top())->push_back(new_info);
+			offset_stack->pop();
+			offset_stack->push(top+get_struct_info($1->type)->struct_fields->size());
+			
+		}
+		
+		| ID ASSIGN Exp SC // 27
+		{
+			string id = dynamic_cast<Value_node*>($1)->value;
+			Info* id_info = get_info(id);
+			
+			if (id_info == NULL || id_info->arg_types!=NULL)
+			{
+				errorUndef(yylineno,id);
+				exit(0);
+			}
+			
+			string exp_type = get_exp_type($3);
+			
+			if (exp_type != id_info->type && !(exp_type =="BYTE" && id_info->type=="INT"))
+			{
+				errorMismatch(yylineno);
+				exit(0);
+			}
+		}
+		
+		| ID PERIOD ID ASSIGN Exp SC // 28
+		{
+			
+			string id = dynamic_cast<Value_node*>($1)->value;
+			
+			Info* id_info = get_info(id);
+			
+			if (id_info == NULL)
+			{
+				errorUndef(yylineno,id);
+				exit(0);
+			}
+			
+			string field = dynamic_cast<Value_node*>($3)->value;
+			
+			if (get_struct_info(id_info->type) == NULL){
+				errorMismatch(yylineno);
+				exit(0);
+			}
+			
+			if (!is_struct_field(id_info->type,field)){
+				errorUndefStructMember(yylineno,id);
+				exit(0);
+			}
+			
+			string field_type = get_struct_field_type(id_info->type,field);
+			string exp_type = get_exp_type($5);
+			
+			if (exp_type != field_type && !(field_type=="INT" && exp_type=="BYTE")){
+				errorMismatch(yylineno);
+				exit(0);
+			}
+		}
+		
+		| Call SC //29
+		
+		| RETURN SC //30
+		{
+			if (ret_type!="VOID")
+			{
+				errorMismatch(yylineno);
+				exit(0);
+			}
+			
+		}
+		
+		| RETURN Exp SC // 31
+		{
+			if (ret_type!=get_exp_type($2) && !(ret_type=="INT" && get_exp_type($2)=="BYTE"))
+			{
+				errorMismatch(yylineno);
+				exit(0);
+			}
+
+		}
+		
+		|IF LPAREN BoolExp RPAREN OpenScope Statement EndScope %prec CONFLICT // 32
+		
+		| IF LPAREN BoolExp RPAREN OpenScope Statement EndScope ELSE OpenScope Statement // 33
+		{	
+			end_scope();
+		}
+		
+		| WHILE LPAREN BoolExp RPAREN {while_count++;} OpenScope Statement // 34
+		{
+			while_count--;
+			end_scope();
+		}
+		
+		| BREAK SC // 35
+		{
+			if (while_count==0)
+			{
+				errorUnexpectedBreak(yylineno);
+				exit(0);
+			}
+		}
+		
+		| CONTINUE SC // 36
+		{
+			if (while_count==0)
+			{
+				errorUnexpectedContinue(yylineno);
+				exit(0);
+			}
+		}
+		;
+		
+		
+Call	: ID LPAREN ExpList RPAREN // 37
+
+		{
+			string id = dynamic_cast<Value_node*>($1)->value;
+			Info* info = get_info(id);
+			
+			if (info==NULL || info->arg_types==NULL){
+				errorUndefFunc(yylineno,id);
+				exit(0);
+			}
+			
+			vector<string>* expect = (info->arg_types);
+			vector<string>* received = dynamic_cast<Exp_list*>($3)->types;
+			
+			check_params(*expect,*received,id);
+			
+			$$ = new Node(info->type);	
+		}
+		
+		| ID LPAREN RPAREN // 38
+		{
+			string id = dynamic_cast<Value_node*>($1)->value;
+			Info* info = get_info(id);
+			
+			if (info == NULL || info->arg_types==NULL){
+				errorUndefFunc(yylineno,id);
+				exit(0);
+			}
+			vector<string>* empty = new vector<string>();
+			if (info->arg_types->size() != 0)
+			{
+				errorPrototypeMismatch(yylineno,id,*(add_struct_to_args(info->arg_types)));
+				exit(0);
+			}
+				
+		}
+		;
+
+		
+ExpList : Exp // 39
+
+		{
+			$$ = new Exp_list(get_exp_type($1));
+		}
+		
+		| Exp COMMA ExpList // 40
+		{
+			$$ = new Exp_list(get_exp_type($1));
+			
+			vector<string>* types = dynamic_cast<Exp_list*>($3)->types;
+			vector<string>::iterator it = types->begin();
+			for (; it!=types->end(); ++it)
+			{
+				dynamic_cast<Exp_list*>($$)->types->push_back(*it);
+			}
+		}
+		;
+		
+		
+		
+Type :	INT // 41
+		{
+			$$ = new Node("INT");			
+		}
+			
+		| BYTE // 42
+		{
+		$$ = new Node("BYTE");
+		}
+		
+		| BOOL // 43
+		{
+			$$ = new Node("BOOL");
+		}
+		;
+		
+StructType: STRUCT ID // 44
+		{
+			string id = dynamic_cast<Value_node*>($2)->value;
+			if (get_struct_info(id)==NULL)
+			{
+				errorUndefStruct(yylineno,id);
+				exit(0);
+			}
+			$$ = new Node(id);
+		}
+		;
+		
+Exp  :	LPAREN Exp RPAREN // 45
+		{
+			$$ = $2;
+		}
+		
+		| Exp BINOP Exp // 46
+		{
+			string type1 = get_exp_type($1);
+			string type3 = get_exp_type($3);
+			
+			if ((type1 != "INT" && type1 != "BYTE") || (type3 != "INT" && type3 != "BYTE")) 
+			{
+				errorMismatch(yylineno);
+				exit(0);
+			}
+			
+			if (type1 == "INT" || type3=="INT" ) 
+				$$ = new Node("INT");
+			else $$ = new Node("BYTE");
+		}
+		
+		| ID // 47
+		{
+			Info* info = get_info(dynamic_cast<Value_node*>($1)->value);
+			if (info==NULL || info->arg_types!=NULL)
+			{
+				errorUndef(yylineno,dynamic_cast<Value_node*>($1)->value);
+				exit(0);
+			}
+			
+			$$ = $1;
+			
+		}
+		
+		| ID PERIOD ID // 48
+		{
+			Info* info = get_info(dynamic_cast<Value_node*>($1)->value);
+			
+			if (info== NULL || get_struct_info(info->type)==NULL){
+				errorUndef(yylineno,dynamic_cast<Value_node*>($1)->value);
+				exit(0);
+			}
+			
+			if (!is_struct_field(info->type,dynamic_cast<Value_node*>($3)->value)){
+				errorUndefStructMember(yylineno,dynamic_cast<Value_node*>($1)->value);
+				exit(0);
+			}
+						
+			$$ = new Node(get_struct_field_type(info->type,dynamic_cast<Value_node*>($3)->value));
+		}
+		
+		| Call // 49
+		{
+			$$ = $1;
+		}
+		
+		| NUM // 50
+		{
+			$$ = $1;
+		}
+		
+		| NUM B // 51
+		{
+			int num = atoi((dynamic_cast<Value_node*>($1)->value).c_str());
+			if (num > 255){
+				errorByteTooLarge(yylineno, dynamic_cast<Value_node*>($1)->value);
+				exit(0);
+			}
+			
+			$$ = new Value_node("BYTE",dynamic_cast<Value_node*>($1)->value);
+		}
+		
+		| STRING // 52
+		
+		{
+			$$ = new Node("STRING");
+		}
+		
+		| TRUE // 53
+		{
+			
+			$$ = new Node("BOOL");
+		}
+		
+		| FALSE // 54
+		{
+			$$ = new Node("BOOL");
+		}
+		
+		| NOT Exp //55
+		{
+			check_exp_type($2,"BOOL");
+			
+			$$ = new Node("BOOL");
+		}
+		
+		| Exp AND Exp // 56
+		{
+			check_exp_type($1,"BOOL");
+			check_exp_type($3,"BOOL");
+			
+			$$ = new Node("BOOL");
+		}
+		
+		| Exp OR Exp // 57
+		{
+			check_exp_type($1,"BOOL");
+			check_exp_type($3,"BOOL");
+			
+			$$ = new Node("BOOL");
+		}
+		
+		| Exp RELOPL Exp // 58
+		{
+			string type1 = get_exp_type($1);
+			string type3 = get_exp_type($3);
+			
+			if ((type1 != "INT" && type1 != "BYTE") || (type3 != "INT" && type3 != "BYTE")) 
+			{
+				errorMismatch(yylineno);
+				exit(0);
+			}
+			
+			$$ = new Node("BOOL");
+		}
+		
+		| Exp RELOPN Exp // 58
+		{
+			string type1 = get_exp_type($1);
+			string type3 = get_exp_type($3);
+			
+			if ((type1 != "INT" && type1 != "BYTE") || (type3 != "INT" && type3 != "BYTE")) 
+			{
+				errorMismatch(yylineno);
+				exit(0);
+			}
+			
+			$$ = new Node("BOOL");
+		}
+		;
+
+%%
+
+Info* get_struct_info(string id){
+	Info* info = get_info(id);
+	if (info==NULL || info->type!="STRUCT") return NULL;
+	else return info;
+}
+
+void check_exp_type(YYSTYPE exp, string type){
+	if (get_exp_type(exp)!=type)
+	{
+		errorMismatch(yylineno);
+		exit(0);
+	}
+}
+
+void check_params(vector<string> expect, vector<string> recieved,string id){
+	
+	if (expect.size() != recieved.size()){
+		errorPrototypeMismatch(yylineno,id,*add_struct_to_args(&expect));
+		exit(0);
+	}
+	for (int i=0; i<expect.size() ; i++){
+		if (expect.at(i)!=recieved.at(i))
+		{
+			if (!(expect.at(i)=="INT" && recieved.at(i)=="BYTE"))
+			{
+				errorPrototypeMismatch(yylineno,id,*add_struct_to_args(&expect));
+				exit(0);
+			}
+		}
+	}
+}
+
+void check_id_free(string id){
+	
+	if (get_info(id) != NULL){
+		errorDef(yylineno,id);
+		exit(0);
+	}
+}
+
+bool is_struct_field(string struct_name,string field){
+	
+	Info* struct_info = get_struct_info(struct_name);
+	
+	vector<string> arg_names = *(get_struct_fields(*(struct_info->struct_fields),2));
+	return (find(arg_names.begin(),arg_names.end(),field) != arg_names.end());
+	
+}
+
+string get_struct_field_type(string struct_ID, string name){ // Assume name is a valid struct field name.
+	
+	Info* info = get_struct_info(struct_ID);
+	vector< pair<string, string> > struct_fields = *(info->struct_fields);
+	vector< pair<string, string> >::iterator it = struct_fields.begin();
+	
+	for (; it!=struct_fields.end(); ++it){
+		if (it->second == name) return it->first;
+	}
+	
+	return "";
+	
+}
+
+string get_exp_type(YYSTYPE exp){
+	if (exp->type == "ID"){
+		Info* info = get_info(dynamic_cast<Value_node*>(exp)->value);
+		return info->type;
+	}
+	else return exp->type;
+}
+
+Info* get_info(string name){
+		
+	stack < SymbolTable* >* temp= new stack < SymbolTable* >(*tables);
+
+	while (temp->size() > 0)
+	{
+		SymbolTable* current_table = temp->top();
+		
+		
+		for (SymbolTable::iterator it = current_table->begin(); it!=current_table->end();++it){
+			
+			if ((*it)->name==name) return *it;
+		}
+		
+		temp->pop();
+
+	}
+				
+
+	return NULL;
+}
+
+vector<string>* get_struct_fields(vector< pair <string, string> > fields, int x){ // Assume x is 1 or 2.
+	vector<string>* result = new vector<string>();
+	
+	vector< pair <string, string> >::iterator it = fields.begin();
+	
+	for (; it!=fields.end(); ++it){
+		if (x==1) {
+			if (get_struct_info(it->first)!=NULL)
+				result->push_back("struct "+(it->first));
+			else result->push_back(it->first);
+		}
+		else if (x==2) result->push_back(it->second);
+	}
+	
+	return result;
+}
+
+void end_scope(){
+	
+	output::endScope();
+	
+	SymbolTable* current_table = tables->top();
+	
+	SymbolTable::iterator it = current_table->begin();
+	Info* info = NULL;
+	vector<string>* types=NULL;
+	for (; it!=current_table->end(); ++it){
+		info = (*it);
+		if (info->type!="STRUCT"){
+			
+			if(info->arg_types == NULL){	// regular type
+				if (get_struct_info(info->type)!=NULL)
+				{
+					printID(info->name,info->offset,"struct "+info->type);
+				}
+				else printID(info->name,info->offset,info->type);
+			}
+			else { // function
+				types = add_struct_to_args(info->arg_types);
+				printID(info->name,info->offset,makeFunctionType(info->type, *(types)));
+			}
+		}		
+	}
+	for (it=current_table->begin();it!=current_table->end();++it)
+	{
+		info = (*it);
+		if (info->type=="STRUCT") { // struct
+		
+			printStructType(info->name,*(get_struct_fields(*(info->struct_fields),1)),*(get_struct_fields(*(info->struct_fields),2)));
+		}
+	}
+	offset_stack->pop();
+	tables->pop();
+	
+}
+
+vector <string>* add_struct_to_args(vector<string>* args){
+	
+	vector <string>* new_args = new vector<string>();
+	
+	for (vector<string>::iterator it = args->begin();it!=args->end();++it)
+	{
+		if (get_struct_info(*it)!=NULL) {
+			new_args->push_back("struct "+*it);
+		}
+		else {
+			new_args->push_back(*it);
+		}
+	}
+	
+	return new_args;
+}
+
+int main()
+{
+	//yydebug=1;
+
+	yyparse();
+}
+
+void yyerror(const char * message)
+{
+	errorSyn(yylineno);
+	exit(0);
+}
